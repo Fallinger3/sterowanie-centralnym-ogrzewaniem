@@ -1,4 +1,4 @@
-Sterownik CO na ESP32
+Sterownik kotła C.O na ESP32 
 
 Projekt sterownika pieca CO oparty na ESP32, z możliwością ustawienia harmonogramów czasowych, ręcznego sterowania przekaźnikiem oraz obsługą wielu sieci WiFi. Urządzenie synchronizuje czas z serwerem NTP i pozwala na konfigurację przez stronę WWW.
 
