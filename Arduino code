@@ -1,0 +1,224 @@
+#include <WiFi.h>
+#include <WiFiMulti.h>
+#include <WebServer.h>
+#include "time.h"
+#include <Preferences.h>
+
+WiFiMulti wifiMulti;
+
+const char* ntpServer = "pool.ntp.org";
+const long gmtOffset_sec = 3600;       
+const int daylightOffset_sec = 3600;  
+
+const int relayPin = 5;
+bool relayState = false;        // true = przekaźnik WŁĄCZONY wg harmonogramu
+bool manualOverride = false;
+
+Preferences prefs;
+
+struct Schedule {
+  int onHour;
+  int onMinute;
+  int offHour;
+  int offMinute;
+  bool days[7]; // 0 = Poniedziałek, 6 = Niedziela
+};
+
+Schedule schedules[2];
+
+WebServer server(80);
+unsigned long lastNtpSync = 0;
+const unsigned long ntpInterval = 10000; // 10 sekund dla testów
+
+// --- Zapis/odczyt ustawień ---
+void saveSettings() {
+  prefs.begin("co-setup", false);
+  for (int i = 0; i < 2; i++) {
+    String prefix = "schedule" + String(i);
+    prefs.putInt((prefix + "onHour").c_str(), schedules[i].onHour);
+    prefs.putInt((prefix + "onMinute").c_str(), schedules[i].onMinute);
+    prefs.putInt((prefix + "offHour").c_str(), schedules[i].offHour);
+    prefs.putInt((prefix + "offMinute").c_str(), schedules[i].offMinute);
+    for (int d = 0; d < 7; d++) {
+      prefs.putBool((prefix + "day" + String(d)).c_str(), schedules[i].days[d]);
+    }
+  }
+  prefs.end();
+}
+
+void loadSettings() {
+  prefs.begin("co-setup", true);
+  schedules[0].onHour = prefs.getInt("schedule0onHour", 10);  
+  schedules[0].onMinute = prefs.getInt("schedule0onMinute", 0);
+  schedules[0].offHour = prefs.getInt("schedule0offHour", 13);
+  schedules[0].offMinute = prefs.getInt("schedule0offMinute", 0);
+
+  schedules[1].onHour = prefs.getInt("schedule1onHour", 14);
+  schedules[1].onMinute = prefs.getInt("schedule1onMinute", 0);
+  schedules[1].offHour = prefs.getInt("schedule1offHour", 16);
+  schedules[1].offMinute = prefs.getInt("schedule1offMinute", 0);
+
+  for (int i = 0; i < 2; i++) {
+    String prefix = "schedule" + String(i);
+    for (int d = 0; d < 7; d++) {
+      schedules[i].days[d] = prefs.getBool((prefix + "day" + String(d)).c_str(), true);
+    }
+  }
+  prefs.end();
+}
+
+// --- Aktualizacja stanu przekaźnika ---
+void updateRelayState(struct tm &timeinfo) {
+  if (manualOverride) return;
+
+  int hour = timeinfo.tm_hour;
+  int minute = timeinfo.tm_min;
+  int weekday = timeinfo.tm_wday;
+  int adjustedWeekday = (weekday == 0) ? 6 : weekday - 1;
+
+  bool wlacz = false;
+  for (int i = 0; i < 2; i++) {
+    if (!schedules[i].days[adjustedWeekday]) continue;
+
+    bool isActive = false;
+
+    if (schedules[i].onHour < schedules[i].offHour ||
+        (schedules[i].onHour == schedules[i].offHour && schedules[i].onMinute < schedules[i].offMinute)) {
+      if ((hour > schedules[i].onHour || (hour == schedules[i].onHour && minute >= schedules[i].onMinute)) &&
+          (hour < schedules[i].offHour || (hour == schedules[i].offHour && minute < schedules[i].offMinute))) {
+        isActive = true;
+      }
+    } else { 
+      if ((hour > schedules[i].onHour || (hour == schedules[i].onHour && minute >= schedules[i].onMinute)) ||
+          (hour < schedules[i].offHour || (hour == schedules[i].offHour && minute < schedules[i].offMinute))) {
+        isActive = true;
+      }
+    }
+    if (isActive) {
+      wlacz = true;
+      break;
+    }
+  }
+
+  if (relayState != wlacz) {
+    relayState = wlacz;
+    digitalWrite(relayPin, relayState ? LOW : HIGH); // LOW = włączony, HIGH = wyłączony
+  }
+}
+
+// --- Aktualizacja czasu NTP ---
+bool updateTime() {
+  struct tm timeinfo;
+  if (getLocalTime(&timeinfo)) {
+    updateRelayState(timeinfo);
+    return true;
+  }
+  return false;
+}
+
+// --- Strona główna ---
+void handleRoot() {
+  String html = "<!DOCTYPE html><html><head><meta charset='UTF-8'><title>Sterownik CO</title>";
+  html += "<meta http-equiv='refresh' content='5'>";
+  html += "<style>.status{font-weight:bold;padding:5px 10px;border-radius:5px;color:white;}.on{background-color:green;}.off{background-color:red;}</style></head><body>";
+  
+  html += "<h1>Ustawienia CO</h1><form action='/save' method='POST'>";
+  String dayNames[] = {"Pon","Wt","Śr","Czw","Pt","Sob","Nie"};
+  for(int i=0;i<2;i++){
+    html += "<h3>Harmonogram "+String(i+1)+"</h3>";
+    html += "Włącz: <input type='number' name='onHour"+String(i)+"' min='0' max='23' value='"+String(schedules[i].onHour)+"'>:";
+    html += "<input type='number' name='onMinute"+String(i)+"' min='0' max='59' value='"+String(schedules[i].onMinute)+"'><br>";
+    html += "Wyłącz: <input type='number' name='offHour"+String(i)+"' min='0' max='23' value='"+String(schedules[i].offHour)+"'>:";
+    html += "<input type='number' name='offMinute"+String(i)+"' min='0' max='59' value='"+String(schedules[i].offMinute)+"'><br>Dni:";
+    for(int d=0;d<7;d++){
+      html += "<input type='checkbox' name='day"+String(i)+"_"+String(d)+"' value='1'"+(schedules[i].days[d]?" checked":"")+">"+dayNames[d]+" ";
+    }
+    html += "<br>";
+  }
+  html += "<input type='submit' value='Zapisz'></form><br>";
+
+  struct tm timeinfo;
+  if(getLocalTime(&timeinfo)){
+    char buffer[16]; strftime(buffer,sizeof(buffer),"%H:%M:%S",&timeinfo);
+    html += "<p><b>Aktualny czas:</b> "+String(buffer)+"</p>";
+  }
+
+  html += "<h3>Stan przekaźnika:</h3>";
+  html += "<span class='status "+String(relayState?"on":"off")+"'>"+String(relayState?"WŁĄCZONY":"WYŁĄCZONY")+"</span><br><br>";
+
+  html += "<h3>Ręczne sterowanie:</h3><form action='/manual' method='POST'>";
+  html += "<input type='submit' name='action' value='Włącz'> ";
+  html += "<input type='submit' name='action' value='Wyłącz'> ";
+  html += "<input type='submit' name='action' value='Automatyczny'>";
+  html += "</form>";
+
+  html += "</body></html>";
+  server.send(200,"text/html",html);
+}
+
+// --- Obsługa zapisu harmonogramu ---
+void handleSave(){
+  for(int i=0;i<2;i++){
+    schedules[i].onHour = server.arg("onHour"+String(i)).toInt();
+    schedules[i].onMinute = server.arg("onMinute"+String(i)).toInt();
+    schedules[i].offHour = server.arg("offHour"+String(i)).toInt();
+    schedules[i].offMinute = server.arg("offMinute"+String(i)).toInt();
+    for(int d=0;d<7;d++){
+      String key="day"+String(i)+"_"+String(d);
+      schedules[i].days[d]=server.hasArg(key)&&server.arg(key)=="1";
+    }
+  }
+  saveSettings();
+  server.sendHeader("Location","/");
+  server.send(303);
+}
+
+// --- Ręczne sterowanie ---
+void handleManual(){
+  String action = server.arg("action");
+  if(action=="Włącz"){relayState=true;manualOverride=true;}
+  else if(action=="Wyłącz"){relayState=false;manualOverride=true;}
+  else if(action=="Automatyczny"){manualOverride=false;}
+  digitalWrite(relayPin, relayState ? LOW : HIGH);
+  server.sendHeader("Location","/");
+  server.send(303);
+}
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(relayPin,OUTPUT);
+  relayState=false;
+  manualOverride=false;
+  digitalWrite(relayPin,HIGH); // bezpieczny start (przekaźnik wyłączony)
+
+  loadSettings();
+
+  // Dodaj sieci WiFi
+  wifiMulti.addAP("Teoja Sieć", "haslo wifi");
+  wifiMulti.addAP("sieć2", "Haslo 2");
+
+  Serial.println("Łączenie z WiFi...");
+  unsigned long wifiTimeout = millis()+30000;
+  while(wifiMulti.run()!=WL_CONNECTED && millis()<wifiTimeout){delay(500);Serial.print(".");}
+  Serial.println();
+  if(WiFi.status()==WL_CONNECTED){Serial.println("Połączono z WiFi, IP: "+WiFi.localIP().toString());}
+  else{Serial.println("Nie udało się połączyć z WiFi!"); return;}
+
+  configTime(gmtOffset_sec,daylightOffset_sec,ntpServer);
+
+  Serial.println("Czekam na synchronizację czasu NTP...");
+  unsigned long startWait = millis();
+  while(!updateTime() && millis()-startWait<15000){delay(500); Serial.print(".");}
+  Serial.println("\nGotowe. Przekaźnik sterowany według harmonogramu.");
+
+  server.on("/", handleRoot);
+  server.on("/save", HTTP_POST, handleSave);
+  server.on("/manual", HTTP_POST, handleManual);
+  server.begin();
+}
+
+void loop() {
+  server.handleClient();
+  if(WiFi.status()!=WL_CONNECTED){wifiMulti.run();}
+  if(!manualOverride && millis()-lastNtpSync>ntpInterval){if(updateTime()){lastNtpSync=millis();}}
+}
