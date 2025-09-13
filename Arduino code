@@ -7,28 +7,29 @@
 WiFiMulti wifiMulti;
 
 const char* ntpServer = "pool.ntp.org";
-const long gmtOffset_sec = 3600;       
-const int daylightOffset_sec = 3600;  
+const long gmtOffset_sec = 3600;
+const int daylightOffset_sec = 3600;
 
 const int relayPin = 5;
-bool relayState = false;        // true = przekaźnik WŁĄCZONY wg harmonogramu
+bool relayState = false;
 bool manualOverride = false;
 
 Preferences prefs;
+bool isAPMode = false;  // NOWA ZMIENNA – true jeśli działa w trybie AP
 
 struct Schedule {
   int onHour;
   int onMinute;
   int offHour;
   int offMinute;
-  bool days[7]; // 0 = Poniedziałek, 6 = Niedziela
+  bool days[7];
 };
 
 Schedule schedules[2];
 
 WebServer server(80);
 unsigned long lastNtpSync = 0;
-const unsigned long ntpInterval = 10000; // 10 sekund dla testów
+const unsigned long ntpInterval = 10000;
 
 // --- Zapis/odczyt ustawień ---
 void saveSettings() {
@@ -48,7 +49,7 @@ void saveSettings() {
 
 void loadSettings() {
   prefs.begin("co-setup", true);
-  schedules[0].onHour = prefs.getInt("schedule0onHour", 10);  
+  schedules[0].onHour = prefs.getInt("schedule0onHour", 10);
   schedules[0].onMinute = prefs.getInt("schedule0onMinute", 0);
   schedules[0].offHour = prefs.getInt("schedule0offHour", 13);
   schedules[0].offMinute = prefs.getInt("schedule0offMinute", 0);
@@ -88,7 +89,7 @@ void updateRelayState(struct tm &timeinfo) {
           (hour < schedules[i].offHour || (hour == schedules[i].offHour && minute < schedules[i].offMinute))) {
         isActive = true;
       }
-    } else { 
+    } else {
       if ((hour > schedules[i].onHour || (hour == schedules[i].onHour && minute >= schedules[i].onMinute)) ||
           (hour < schedules[i].offHour || (hour == schedules[i].offHour && minute < schedules[i].offMinute))) {
         isActive = true;
@@ -102,7 +103,7 @@ void updateRelayState(struct tm &timeinfo) {
 
   if (relayState != wlacz) {
     relayState = wlacz;
-    digitalWrite(relayPin, relayState ? LOW : HIGH); // LOW = włączony, HIGH = wyłączony
+    digitalWrite(relayPin, relayState ? LOW : HIGH);
   }
 }
 
@@ -116,13 +117,22 @@ bool updateTime() {
   return false;
 }
 
-// --- Strona główna ---
+// --- Strona WWW ---
 void handleRoot() {
   String html = "<!DOCTYPE html><html><head><meta charset='UTF-8'><title>Sterownik CO</title>";
-  html += "<meta http-equiv='refresh' content='5'>";
+  html += "<meta http-equiv='refresh' content='60'>";
   html += "<style>.status{font-weight:bold;padding:5px 10px;border-radius:5px;color:white;}.on{background-color:green;}.off{background-color:red;}</style></head><body>";
   
-  html += "<h1>Ustawienia CO</h1><form action='/save' method='POST'>";
+  html += "<h1>Ustawienia CO</h1>";
+
+  // 🔥 Dodana informacja o trybie pracy
+  if(isAPMode) {
+    html += "<p><b>Tryb:</b> Access Point (AP)<br>Adres: 192.168.4.1</p>";
+  } else {
+    html += "<p><b>Tryb:</b> Połączony z WiFi (STA)<br>Adres: " + WiFi.localIP().toString() + "</p>";
+  }
+
+  html += "<form action='/save' method='POST'>";
   String dayNames[] = {"Pon","Wt","Śr","Czw","Pt","Sob","Nie"};
   for(int i=0;i<2;i++){
     html += "<h3>Harmonogram "+String(i+1)+"</h3>";
@@ -156,7 +166,7 @@ void handleRoot() {
   server.send(200,"text/html",html);
 }
 
-// --- Obsługa zapisu harmonogramu ---
+// --- Obsługa zapisu ---
 void handleSave(){
   for(int i=0;i<2;i++){
     schedules[i].onHour = server.arg("onHour"+String(i)).toInt();
@@ -173,7 +183,7 @@ void handleSave(){
   server.send(303);
 }
 
-// --- Ręczne sterowanie ---
+// --- Obsługa ręczna ---
 void handleManual(){
   String action = server.arg("action");
   if(action=="Włącz"){relayState=true;manualOverride=true;}
@@ -189,26 +199,40 @@ void setup() {
   pinMode(relayPin,OUTPUT);
   relayState=false;
   manualOverride=false;
-  digitalWrite(relayPin,HIGH); // bezpieczny start (przekaźnik wyłączony)
+  digitalWrite(relayPin,HIGH);
 
   loadSettings();
 
-  // Dodaj sieci WiFi
-  wifiMulti.addAP("Teoja Sieć", "haslo wifi");
-  wifiMulti.addAP("sieć2", "Haslo 2");
+  wifiMulti.addAP("ASUS HACKER", "Dom1111111");
+  wifiMulti.addAP("Tenda_C8C650", "Dom1111111");
 
   Serial.println("Łączenie z WiFi...");
   unsigned long wifiTimeout = millis()+30000;
-  while(wifiMulti.run()!=WL_CONNECTED && millis()<wifiTimeout){delay(500);Serial.print(".");}
+  while(wifiMulti.run()!=WL_CONNECTED && millis()<wifiTimeout){
+    delay(500);
+    Serial.print(".");
+  }
   Serial.println();
-  if(WiFi.status()==WL_CONNECTED){Serial.println("Połączono z WiFi, IP: "+WiFi.localIP().toString());}
-  else{Serial.println("Nie udało się połączyć z WiFi!"); return;}
+
+  if(WiFi.status()==WL_CONNECTED){
+    Serial.println("Połączono z WiFi, IP: "+WiFi.localIP().toString());
+    isAPMode = false;
+  } else {
+    Serial.println("Nie udało się połączyć z WiFi!");
+    Serial.println("Uruchamiam tryb Access Point...");
+    WiFi.softAP("ESP32-CO", "12345678");
+    Serial.println("ESP32 działa jako AP. SSID: ESP32-CO, hasło: 12345678");
+    Serial.println("Adres do wejścia: 192.168.4.1");
+    isAPMode = true;
+  }
 
   configTime(gmtOffset_sec,daylightOffset_sec,ntpServer);
 
   Serial.println("Czekam na synchronizację czasu NTP...");
   unsigned long startWait = millis();
-  while(!updateTime() && millis()-startWait<15000){delay(500); Serial.print(".");}
+  while(!updateTime() && millis()-startWait<15000){
+    delay(500); Serial.print(".");
+  }
   Serial.println("\nGotowe. Przekaźnik sterowany według harmonogramu.");
 
   server.on("/", handleRoot);
@@ -220,5 +244,7 @@ void setup() {
 void loop() {
   server.handleClient();
   if(WiFi.status()!=WL_CONNECTED){wifiMulti.run();}
-  if(!manualOverride && millis()-lastNtpSync>ntpInterval){if(updateTime()){lastNtpSync=millis();}}
+  if(!manualOverride && millis()-lastNtpSync>ntpInterval){
+    if(updateTime()){lastNtpSync=millis();}
+  }
 }
