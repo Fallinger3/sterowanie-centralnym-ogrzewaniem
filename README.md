@@ -77,7 +77,7 @@ Dostępne opcje:
 
 ⸻
 
-Screenshot (przykład strony WWW)
+Screenshot 
 
 (Tu możesz dodać zrzut ekranu po wgraniu kodu)
 
@@ -86,3 +86,6 @@ Screenshot (przykład strony WWW)
 Autor
 
 Projekt przygotowany do sterowania instalacją C.O, łatwy do rozbudowy (np. o MQTT, czujniki temperatury, więcej przekaźników).
+
+
+## Diagram działania harmonogramu
